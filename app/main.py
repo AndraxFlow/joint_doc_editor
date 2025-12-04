@@ -1,8 +1,7 @@
 from fastapi import FastAPI
-from app.api.http.health import router as health_router
-from app.domains.identity.router import router as identity_router
+from app.api.router import api_router
 
 app = FastAPI(title="DocCollab")
 
-app.include_router(health_router)
-app.include_router(identity_router)
+# Подключаем главный роутер
+app.include_router(api_router, prefix="/api/v1")

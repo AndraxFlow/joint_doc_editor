@@ -1,10 +1,10 @@
 fastapi
 uvicorn[standard]
-pydantic
-python-dotenv
-sqlalchemy
+sqlalchemy[asyncio]
 asyncpg
 alembic
+pydantic
+pydantic-settings
+python-dotenv
 passlib[bcrypt]
-python-jose
-pydantic-settings>=2.0.0
+PyJWT
