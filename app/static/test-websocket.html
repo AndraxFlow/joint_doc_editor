@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Test - DocCollab</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .connected {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .editor {
+            width: 100%;
+            height: 300px;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 14px;
+            resize: vertical;
+        }
+        .logs {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 10px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+        .btn {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        .btn:hover {
+            background-color: #0056b3;
+        }
+        .btn:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 WebSocket Test - DocCollab</h1>
+        
+        <div id="status" class="status disconnected">❌ Не подключено</div>
+        
+        <div>
+            <button id="connectBtn" class="btn">🔌 Подключиться к WebSocket</button>
+            <button id="disconnectBtn" class="btn" disabled>🔌 Отключиться</button>
+            <button id="clearBtn" class="btn">🗑️ Очистить логи</button>
+        </div>
+        
+        <div style="margin: 20px 0;">
+            <label for="documentId"><strong>ID документа:</strong></label>
+            <input type="text" id="documentId" value="cb73c6d3-8aed-4a1f-b06d-5b507aed15dc" style="width: 400px; margin-left: 10px; padding: 5px;">
+        </div>
+        
+        <div style="margin: 20px 0;">
+            <label for="userId"><strong>ID пользователя:</strong></label>
+            <input type="text" id="userId" value="c1de4629-e46b-4baf-b401-da37097508f7" style="width: 400px; margin-left: 10px; padding: 5px;">
+        </div>
+        
+        <div style="margin: 20px 0;">
+            <label for="editor"><strong>Редактор:</strong></label><br>
+            <textarea id="editor" class="editor" placeholder="Начните печатать здесь для тестирования совместного редактирования..."></textarea>
+        </div>
+        
+        <div>
+            <strong>📋 Логи WebSocket:</strong>
+            <div id="logs" class="logs"></div>
+        </div>
+    </div>
+
+    <script>
+        class WebSocketTest {
+            constructor() {
+                this.websocket = null;
+                this.isConnected = false;
+                this.isApplyingRemoteOperation = false;
+                this.localVersion = 0;
+                this.syncInterval = null;
+                
+                this.setupElements();
+                this.setupEventListeners();
+            }
+            
+            setupElements() {
+                this.statusEl = document.getElementById('status');
+                this.connectBtn = document.getElementById('connectBtn');
+                this.disconnectBtn = document.getElementById('disconnectBtn');
+                this.clearBtn = document.getElementById('clearBtn');
+                this.documentIdEl = document.getElementById('documentId');
+                this.userIdEl = document.getElementById('userId');
+                this.editorEl = document.getElementById('editor');
+                this.logsEl = document.getElementById('logs');
+            }
+            
+            setupEventListeners() {
+                this.connectBtn.addEventListener('click', () => this.connect());
+                this.disconnectBtn.addEventListener('click', () => this.disconnect());
+                this.clearBtn.addEventListener('click', () => this.clearLogs());
+                
+                this.editorEl.addEventListener('input', () => {
+                    if (!this.isApplyingRemoteOperation) {
+                        this.handleLocalChange();
+                    }
+                });
+            }
+            
+            connect() {
+                const documentId = this.documentIdEl.value.trim();
+                const userId = this.userIdEl.value.trim();
+                
+                if (!documentId || !userId) {
+                    this.log('❌ Пожалуйста, укажите ID документа и пользователя', 'error');
+                    return;
+                }
+                
+                if (this.websocket) {
+                    this.websocket.close();
+                }
+                
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsHost = window.location.host;
+                const wsUrl = `${wsProtocol}//${wsHost}/collaboration/documents/${documentId}/ws/${userId}`;
+                
+                this.log(`🔌 Подключение к WebSocket: ${wsUrl}`, 'info');
+                
+                try {
+                    this.websocket = new WebSocket(wsUrl);
+                    
+                    this.websocket.onopen = () => {
+                        this.log('✅ WebSocket подключен успешно!', 'success');
+                        this.updateConnectionStatus(true);
+                        this.isConnected = true;
+                        this.startPeriodicSync();
+                    };
+                    
+                    this.websocket.onmessage = (event) => {
+                        const message = JSON.parse(event.data);
+                        this.log(`📨 Получено сообщение: ${JSON.stringify(message)}`, 'info');
+                        this.handleMessage(message);
+                    };
+                    
+                    this.websocket.onclose = (event) => {
+                        this.log(`❌ WebSocket отключен: ${event.code} - ${event.reason}`, 'error');
+                        this.updateConnectionStatus(false);
+                        this.isConnected = false;
+                        this.stopPeriodicSync();
+                    };
+                    
+                    this.websocket.onerror = (error) => {
+                        this.log(`🚫 Ошибка WebSocket: ${error}`, 'error');
+                        this.updateConnectionStatus(false);
+                    };
+                    
+                } catch (error) {
+                    this.log(`💥 Ошибка подключения: ${error.message}`, 'error');
+                }
+            }
+            
+            disconnect() {
+                if (this.websocket) {
+                    this.websocket.close();
+                    this.websocket = null;
+                }
+                this.updateConnectionStatus(false);
+                this.isConnected = false;
+            }
+            
+            handleMessage(message) {
+                switch (message.type) {
+                    case 'connected':
+                        this.log(`🎉 Подключен к документу: ${message.data.document_id}`, 'success');
+                        this.log(`👥 Активные пользователи: ${message.data.active_users.join(', ')}`, 'info');
+                        break;
+                    case 'operation':
+                        this.handleRemoteOperation(message.data);
+                        break;
+                    case 'sync_response':
+                        this.handleSyncResponse(message.data);
+                        break;
+                    case 'user_joined':
+                        this.log(`👤 Пользователь присоединился: ${message.data.user_id}`, 'info');
+                        break;
+                    case 'user_left':
+                        this.log(`👋 Пользователь вышел: ${message.data.user_id}`, 'info');
+                        break;
+                    case 'error':
+                        this.log(`❌ Ошибка сервера: ${message.data.message}`, 'error');
+                        break;
+                    default:
+                        this.log(`❓ Неизвестное сообщение: ${message.type}`, 'info');
+                }
+            }
+            
+            handleLocalChange() {
+                if (!this.isConnected || !this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+                    return;
+                }
+                
+                // Для простоты, отправляем весь контент как операцию замены
+                const content = this.editorEl.value;
+                const operation = {
+                    type: 'operation',
+                    data: {
+                        type: 'replace',
+                        content: content,
+                        version: this.localVersion++
+                    }
+                };
+                
+                this.log(`📤 Отправка операции: ${JSON.stringify(operation)}`, 'info');
+                this.websocket.send(JSON.stringify(operation));
+            }
+            
+            handleRemoteOperation(operation) {
+                this.isApplyingRemoteOperation = true;
+                
+                try {
+                    if (operation.type === 'replace') {
+                        // Простая замена всего содержимого
+                        const newContent = operation.content || '';
+                        this.editorEl.value = newContent;
+                        this.log(`✅ Применена операция замены: "${newContent}"`, 'success');
+                    } else if (operation.type === 'insert') {
+                        const currentContent = this.editorEl.value;
+                        const pos = operation.position || 0;
+                        const text = operation.content || '';
+                        const newContent = currentContent.slice(0, pos) + text + currentContent.slice(pos);
+                        this.editorEl.value = newContent;
+                        this.log(`✅ Применена операция вставки: позиция ${pos}, текст "${text}"`, 'success');
+                    } else if (operation.type === 'delete') {
+                        const currentContent = this.editorEl.value;
+                        const pos = operation.position || 0;
+                        const length = operation.length || 0;
+                        const newContent = currentContent.slice(0, pos) + currentContent.slice(pos + length);
+                        this.editorEl.value = newContent;
+                        this.log(`✅ Применена операция удаления: позиция ${pos}, длина ${length}`, 'success');
+                    }
+                } catch (error) {
+                    this.log(`❌ Ошибка применения операции: ${error.message}`, 'error');
+                } finally {
+                    setTimeout(() => {
+                        this.isApplyingRemoteOperation = false;
+                    }, 100);
+                }
+            }
+            
+            startPeriodicSync() {
+                // Запускаем периодическую синхронизацию каждые 2 секунды
+                this.syncInterval = setInterval(() => {
+                    if (this.isConnected && this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+                        this.requestSync();
+                    }
+                }, 2000);
+                this.log('🔄 Запущена периодическая синхронизация', 'info');
+            }
+            
+            stopPeriodicSync() {
+                if (this.syncInterval) {
+                    clearInterval(this.syncInterval);
+                    this.syncInterval = null;
+                    this.log('⏹️ Остановлена периодическая синхронизация', 'info');
+                }
+            }
+            
+            requestSync() {
+                const syncMessage = {
+                    type: 'sync_request'
+                };
+                this.websocket.send(JSON.stringify(syncMessage));
+                this.log('📤 Запрошена синхронизация', 'info');
+            }
+            
+            handleSyncResponse(data) {
+                this.isApplyingRemoteOperation = true;
+                try {
+                    const serverContent = data.content || '';
+                    const serverVersion = data.version || 0;
+                    
+                    // Применяем состояние с сервера только если версия новее
+                    if (serverVersion > this.localVersion) {
+                        this.editorEl.value = serverContent;
+                        this.localVersion = serverVersion;
+                        this.log(`🔄 Синхронизировано с сервером: версия ${serverVersion}`, 'success');
+                    }
+                } catch (error) {
+                    this.log(`❌ Ошибка синхронизации: ${error.message}`, 'error');
+                } finally {
+                    setTimeout(() => {
+                        this.isApplyingRemoteOperation = false;
+                    }, 100);
+                }
+            }
+            
+            updateConnectionStatus(connected) {
+                if (connected) {
+                    this.statusEl.className = 'status connected';
+                    this.statusEl.textContent = '✅ Подключено';
+                    this.connectBtn.disabled = true;
+                    this.disconnectBtn.disabled = false;
+                } else {
+                    this.statusEl.className = 'status disconnected';
+                    this.statusEl.textContent = '❌ Не подключено';
+                    this.connectBtn.disabled = false;
+                    this.disconnectBtn.disabled = true;
+                }
+            }
+            
+            log(message, type = 'info') {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                logEntry.style.marginBottom = '5px';
+                
+                let color = '#000';
+                switch (type) {
+                    case 'success': color = '#28a745'; break;
+                    case 'error': color = '#dc3545'; break;
+                    case 'info': color = '#007bff'; break;
+                }
+                
+                logEntry.innerHTML = `<span style="color: #666;">[${timestamp}]</span> <span style="color: ${color};">${message}</span>`;
+                this.logsEl.appendChild(logEntry);
+                this.logsEl.scrollTop = this.logsEl.scrollHeight;
+            }
+            
+            clearLogs() {
+                this.logsEl.innerHTML = '';
+                this.log('🗑️ Логи очищены', 'info');
+            }
+        }
+        
+        // Инициализация при загрузке страницы
+        document.addEventListener('DOMContentLoaded', () => {
+            window.wsTest = new WebSocketTest();
+        });
+    </script>
+</body>
+</html>

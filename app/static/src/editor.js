@@ -15,11 +15,8 @@ class CollaborativeEditor {
     }
     
     init() {
-        console.log('CollaborativeEditor init() called');
-        
         // Инициализация будет вызвана из app.js
         window.initializeEditor = (content = '') => {
-            console.log('window.initializeEditor called with content length:', content?.length || 0);
             this.createEditor(content);
         };
         
@@ -31,22 +28,15 @@ class CollaborativeEditor {
         window.updateCursor = (position) => {
             this.updateLocalCursor(position);
         };
-        
-        console.log('window.initializeEditor function created:', typeof window.initializeEditor === 'function');
     }
     
     createEditor(content) {
-        console.log('createEditor called with content length:', content?.length || 0);
-        
         const textarea = window.document.getElementById('editor');
-        console.log('Textarea element found:', !!textarea);
         
         if (!textarea) {
             console.error('Textarea element not found!');
             return;
         }
-        
-        console.log('CodeMirror available:', typeof CodeMirror !== 'undefined');
         
         try {
             this.editor = CodeMirror.fromTextArea(textarea, {
@@ -62,16 +52,12 @@ class CollaborativeEditor {
                 value: content
             });
             
-            console.log('CodeMirror editor created:', !!this.editor);
-            
             // Устанавливаем глобальную ссылку на редактор
             window.editor = this.editor;
-            console.log('window.editor set:', !!window.editor);
             
             // Устанавливаем начальное содержимое
             if (content !== undefined && content !== null) {
                 this.editor.setValue(content);
-                console.log('Editor content set, length:', content?.length || 0);
             }
             
             // Обработчики событий
