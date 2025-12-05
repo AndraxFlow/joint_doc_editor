@@ -1,0 +1,6 @@
+.env
+*/__pycache__/
+__pycache__
+FINAL_PROJECT_SUMMARY.md
+architecture_analysis.md
+uml_diagrams.md

@@ -8,6 +8,9 @@ class DocCollabApp {
         this.documents = [];
         this.websocket = null;
         this.isConnected = false;
+        this.isApplyingRemoteOperation = false; // Флаг для предотвращения циклов
+        this.localVersion = 0; // Версия локальных изменений
+        this.syncInterval = null; // Интервал периодической синхронизации
         
         this.init();
     }
@@ -19,6 +22,49 @@ class DocCollabApp {
         this.showMainApp();
         await this.loadUserData();
         await this.loadDocuments();
+        
+        // Проверяем URL для прямого перехода к документу
+        this.handleDirectDocumentAccess();
+    }
+    
+    handleDirectDocumentAccess() {
+        const path = window.location.pathname;
+        const documentMatch = path.match(/\/documents\/([a-f0-9-]{36})/);
+        
+        if (documentMatch) {
+            const documentId = documentMatch[1];
+            console.log('🎯 Direct document access detected:', documentId);
+            
+            // Ищем документ в списке
+            const document = this.documents.find(doc => doc.uuid === documentId);
+            if (document) {
+                console.log('📄 Document found in list, opening...');
+                setTimeout(() => {
+                    this.openDocument(document);
+                }, 500);
+            } else {
+                console.log('📄 Document not in list, loading directly...');
+                this.loadDocumentDirectly(documentId);
+            }
+        }
+    }
+    
+    async loadDocumentDirectly(documentId) {
+        try {
+            const fullDocument = await this.apiRequest(`/documents/${documentId}`);
+            console.log('📄 Document loaded directly:', fullDocument);
+            
+            // Добавляем документ в список если его там нет
+            if (!this.documents.find(doc => doc.uuid === documentId)) {
+                this.documents.unshift(fullDocument);
+                this.renderDocumentList();
+            }
+            
+            this.openDocument(fullDocument);
+        } catch (error) {
+            console.error('❌ Failed to load document directly:', error);
+            this.showError('Ошибка', 'Не удалось загрузить документ');
+        }
     }
     
     setupEventListeners() {
@@ -251,78 +297,100 @@ class DocCollabApp {
     async openDocument(doc) {
         try {
             console.log('Opening document:', doc);
-            console.log('Document content:', doc.content);
-            console.log('Document version:', doc.version);
             
-            this.currentDocument = doc;
+            const fullDocument = await this.apiRequest(`/documents/${doc.uuid}`);
+            console.log('Full document loaded:', fullDocument);
+            
+            this.currentDocument = fullDocument;
             this.renderDocumentList();
             
-            // Проверяем существование элементов
+            // 1. Скрываем welcome screen
             const welcomeScreen = window.document.getElementById('welcomeScreen');
-            const editorContainer = window.document.getElementById('editorContainer');
-            const editorTextarea = window.document.getElementById('editor');
-            
-            console.log('Elements found:', {
-                welcomeScreen: !!welcomeScreen,
-                editorContainer: !!editorContainer,
-                editorTextarea: !!editorTextarea
-            });
-            
-            // Показываем интерфейс редактора
             if (welcomeScreen) {
                 welcomeScreen.style.display = 'none';
                 console.log('Welcome screen hidden');
             }
             
+            // 2. Показываем editor container
+            const editorContainer = window.document.getElementById('editorContainer');
             if (editorContainer) {
                 editorContainer.style.display = 'flex';
+                editorContainer.style.opacity = '1';
                 console.log('Editor container shown');
             }
             
+            // 3. Устанавливаем заголовок и UI элементы
             window.document.getElementById('backBtn').style.display = 'block';
-            window.document.getElementById('documentTitle').textContent = doc.title;
+            window.document.getElementById('documentTitle').textContent = fullDocument.title;
             window.document.getElementById('documentVersion').style.display = 'inline-block';
-            window.document.getElementById('documentVersion').textContent = `v${doc.version}`;
+            window.document.getElementById('documentVersion').textContent = `v${fullDocument.version}`;
             window.document.getElementById('saveBtn').style.display = 'block';
             window.document.getElementById('shareBtn').style.display = 'block';
             window.document.getElementById('exportBtn').style.display = 'block';
             
-            console.log('UI elements updated');
+            // 4. ПОПРАВКА: Получаем элемент textarea/editor
+            let editorElement;
             
-            // Инициализируем редактор
-            console.log('Initializing editor with content length:', doc.content?.length || 0);
-            console.log('window.initializeEditor function exists:', typeof window.initializeEditor === 'function');
-            
-            if (typeof window.initializeEditor === 'function') {
-                console.log('Calling initializeEditor with content');
-                window.initializeEditor(doc.content);
+            // Сначала пробуем найти CodeMirror
+            if (window.editor && typeof window.editor.setValue === 'function') {
+                window.editor.setValue(fullDocument.content || '');
+                editorElement = window.editor.getWrapperElement();
+                console.log('Using CodeMirror editor');
                 
-                // Проверяем, создался ли редактор
-                setTimeout(() => {
-                    console.log('Editor after initialization:', {
-                        windowEditor: !!window.editor,
-                        editorType: typeof window.editor,
-                        hasSetValue: window.editor && typeof window.editor.setValue === 'function'
+                // Добавляем обработчик изменений для CodeMirror
+                window.editor.on('change', (change) => {
+                    if (!this.isApplyingRemoteOperation) {
+                        this.handleLocalChange(change);
+                    }
+                });
+            }
+            // Если нет CodeMirror, используем textarea
+            else {
+                const textarea = window.document.getElementById('editor');
+                if (textarea) {
+                    textarea.value = fullDocument.content || '';
+                    textarea.style.display = 'block';
+                    textarea.style.width = '100%';
+                    textarea.style.height = '100%';
+                    textarea.style.padding = '20px';
+                    textarea.style.fontSize = '16px';
+                    textarea.style.lineHeight = '1.5';
+                    textarea.style.border = '1px solid #ddd';
+                    textarea.style.borderRadius = '4px';
+                    textarea.style.fontFamily = 'monospace';
+                    textarea.style.outline = 'none';
+                    textarea.style.resize = 'none';
+                    textarea.focus();
+                    editorElement = textarea;
+                    console.log('Using textarea editor with content length:', fullDocument.content?.length || 0);
+                    
+                    // Добавляем обработчик изменений для textarea
+                    let lastValue = textarea.value;
+                    textarea.addEventListener('input', () => {
+                        if (!this.isApplyingRemoteOperation && textarea.value !== lastValue) {
+                            const change = {
+                                origin: 'input',
+                                from: {line: 0, ch: lastValue.length},
+                                to: {line: 0, ch: textarea.value.length},
+                                text: [textarea.value.slice(lastValue.length)],
+                                removed: []
+                            };
+                            this.handleLocalChange(change);
+                            lastValue = textarea.value;
+                        }
                     });
-                }, 100);
-                
-            } else {
-                console.error('initializeEditor function not found');
-                // Создаем простой редактор как запасной вариант
-                if (editorTextarea) {
-                    editorTextarea.value = doc.content || '';
-                    editorTextarea.style.display = 'block';
-                    editorTextarea.style.width = '100%';
-                    editorTextarea.style.height = '100%';
-                    editorTextarea.style.border = 'none';
-                    editorTextarea.style.outline = 'none';
-                    editorTextarea.style.resize = 'none';
-                    editorTextarea.style.fontFamily = 'monospace';
-                    editorTextarea.style.fontSize = '14px';
-                    editorTextarea.style.padding = '10px';
-                    console.log('Fallback textarea created with content length:', doc.content?.length || 0);
                 }
             }
+            
+            // 5. Подключаем WebSocket для совместного редактирования
+            this.connectWebSocket(fullDocument.uuid);
+            
+            // 6. Прокручиваем к редактору
+            if (editorElement) {
+                editorElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+            
+            console.log('Document opened successfully');
             
         } catch (error) {
             console.error('Failed to open document:', error);
@@ -358,12 +426,17 @@ class DocCollabApp {
         // Получаем содержимое из редактора или из textarea
         if (window.editor && typeof window.editor.getValue === 'function') {
             content = window.editor.getValue();
+            console.log('Content from CodeMirror:', content);
         } else {
             const textarea = window.document.getElementById('editor');
             if (textarea) {
                 content = textarea.value;
+                console.log('Content from textarea:', content);
             }
         }
+        
+        console.log('Saving document with content length:', content.length);
+        console.log('Content preview:', content.substring(0, 100));
         
         const saveBtn = window.document.getElementById('saveBtn');
         const originalText = saveBtn.innerHTML;
@@ -378,6 +451,8 @@ class DocCollabApp {
                     content: content
                 })
             });
+            
+            console.log('Save response:', response);
             
             this.currentDocument = response;
             window.document.getElementById('documentVersion').textContent = `v${response.version}`;
@@ -430,40 +505,75 @@ class DocCollabApp {
     }
     
     async connectWebSocket(documentId) {
-        if (!this.currentUser) return;
+        console.log('🔌 connectWebSocket called with documentId:', documentId);
+        console.log('👤 Current user:', this.currentUser);
+        
+        if (!this.currentUser) {
+            console.error('❌ No current user, cannot connect WebSocket');
+            return;
+        }
+        
+        console.log('🌐 Window location:', {
+            protocol: window.location.protocol,
+            host: window.location.host,
+            href: window.location.href
+        });
+        
+        // Закрываем предыдущее соединение если есть
+        if (this.websocket) {
+            this.websocket.close();
+        }
         
         // Используем текущий домен для WebSocket
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsHost = window.location.host;
         const wsUrl = `${wsProtocol}//${wsHost}/collaboration/documents/${documentId}/ws/${this.currentUser.uuid}`;
         
+        console.log('Connecting to WebSocket:', wsUrl);
+        
         try {
             this.websocket = new WebSocket(wsUrl);
             
             this.websocket.onopen = () => {
-                console.log('WebSocket connected');
+                console.log('✅ WebSocket connected successfully');
                 this.updateConnectionStatus(true);
                 this.isConnected = true;
+                this.startPeriodicSync();
+                
+                // Показываем индикатор совместной работы
+                const activeUsersDiv = window.document.getElementById('activeUsers');
+                if (activeUsersDiv) {
+                    activeUsersDiv.style.display = 'block';
+                    console.log('Active users panel shown');
+                }
             };
             
             this.websocket.onmessage = (event) => {
                 const message = JSON.parse(event.data);
+                console.log('📨 WebSocket message received:', message);
                 this.handleWebSocketMessage(message);
             };
             
-            this.websocket.onclose = () => {
-                console.log('WebSocket disconnected');
+            this.websocket.onclose = (event) => {
+                console.log('❌ WebSocket disconnected:', event.code, event.reason);
                 this.updateConnectionStatus(false);
                 this.isConnected = false;
+                this.stopPeriodicSync();
+                
+                // Скрываем индикатор совместной работы
+                const activeUsersDiv = window.document.getElementById('activeUsers');
+                if (activeUsersDiv) {
+                    activeUsersDiv.style.display = 'none';
+                }
             };
             
             this.websocket.onerror = (error) => {
-                console.error('WebSocket error:', error);
+                console.error('🚫 WebSocket error:', error);
                 this.updateConnectionStatus(false);
             };
             
         } catch (error) {
-            console.error('Failed to connect WebSocket:', error);
+            console.error('💥 Failed to connect WebSocket:', error);
             this.updateConnectionStatus(false);
         }
     }
@@ -472,6 +582,9 @@ class DocCollabApp {
         switch (message.type) {
             case 'operation':
                 this.handleRemoteOperation(message.data);
+                break;
+            case 'sync_response':
+                this.handleSyncResponse(message.data);
                 break;
             case 'cursor':
                 this.handleRemoteCursor(message.data);
@@ -488,20 +601,130 @@ class DocCollabApp {
         }
     }
     
+    handleLocalChange(change) {
+        if (!this.isConnected || !this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+            console.log('WebSocket not connected, skipping local change');
+            return;
+        }
+        
+        console.log('Handling local change:', change);
+        
+        // Получаем текущее содержимое редактора
+        let content = '';
+        if (window.editor && typeof window.editor.getValue === 'function') {
+            content = window.editor.getValue();
+        } else {
+            const textarea = window.document.getElementById('editor');
+            if (textarea) {
+                content = textarea.value;
+            }
+        }
+        
+        // Создаем операцию замены всего содержимого
+        const operation = {
+            type: 'operation',
+            data: {
+                type: 'replace',
+                content: content,
+                version: this.localVersion++
+            }
+        };
+        
+        console.log('Sending operation:', operation);
+        this.websocket.send(JSON.stringify(operation));
+    }
+    
+    getOperationType(change) {
+        if (change.origin === 'input') {
+            return 'insert';
+        } else if (change.origin === '+delete') {
+            return 'delete';
+        }
+        return 'insert';
+    }
+    
+    getOperationPosition(change) {
+        if (change.from && typeof change.from.ch === 'number') {
+            return change.from.ch;
+        }
+        return 0;
+    }
+    
+    getOperationContent(change) {
+        if (change.text && Array.isArray(change.text) && change.text.length > 0) {
+            return change.text.join('\n');
+        }
+        return '';
+    }
+    
+    getOperationLength(change) {
+        if (change.removed && Array.isArray(change.removed)) {
+            return change.removed.join('\n').length;
+        }
+        return 0;
+    }
+    
     handleRemoteOperation(operation) {
-        if (!window.editor) return;
+        console.log('🔄 Applying remote operation:', operation);
         
-        // Применяем операцию к редактору
-        // Это упрощенная реализация
-        console.log('Applying remote operation:', operation);
+        // Устанавливаем флаг, чтобы предотвратить отправку изменений обратно
+        this.isApplyingRemoteOperation = true;
         
-        // В реальном приложении здесь будет полная реализация OT
-        if (operation.type === 'insert') {
-            const pos = operation.position;
-            const text = operation.content;
-            const currentContent = window.editor.getValue();
-            const newContent = currentContent.slice(0, pos) + text + currentContent.slice(pos);
-            window.editor.setValue(newContent);
+        try {
+            // Работаем с CodeMirror если доступен
+            if (window.editor && typeof window.editor.getValue === 'function') {
+                if (operation.type === 'replace') {
+                    const newContent = operation.content || '';
+                    window.editor.setValue(newContent);
+                    console.log('✅ Replace operation applied:', newContent);
+                } else if (operation.type === 'insert') {
+                    const currentContent = window.editor.getValue();
+                    const pos = operation.position || 0;
+                    const text = operation.content || '';
+                    const newContent = currentContent.slice(0, pos) + text + currentContent.slice(pos);
+                    window.editor.setValue(newContent);
+                    console.log('✅ Insert operation applied:', { pos, text });
+                } else if (operation.type === 'delete') {
+                    const currentContent = window.editor.getValue();
+                    const pos = operation.position || 0;
+                    const length = operation.length || 0;
+                    const newContent = currentContent.slice(0, pos) + currentContent.slice(pos + length);
+                    window.editor.setValue(newContent);
+                    console.log('✅ Delete operation applied:', { pos, length });
+                }
+            }
+            // Работаем с textarea если CodeMirror недоступен
+            else {
+                const textarea = window.document.getElementById('editor');
+                if (textarea) {
+                    if (operation.type === 'replace') {
+                        const newContent = operation.content || '';
+                        textarea.value = newContent;
+                        console.log('✅ Replace operation applied to textarea:', newContent);
+                    } else if (operation.type === 'insert') {
+                        const currentContent = textarea.value;
+                        const pos = operation.position || 0;
+                        const text = operation.content || '';
+                        const newContent = currentContent.slice(0, pos) + text + currentContent.slice(pos);
+                        textarea.value = newContent;
+                        console.log('✅ Insert operation applied to textarea:', { pos, text });
+                    } else if (operation.type === 'delete') {
+                        const currentContent = textarea.value;
+                        const pos = operation.position || 0;
+                        const length = operation.length || 0;
+                        const newContent = currentContent.slice(0, pos) + currentContent.slice(pos + length);
+                        textarea.value = newContent;
+                        console.log('✅ Delete operation applied to textarea:', { pos, length });
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('❌ Error applying remote operation:', error);
+        } finally {
+            // Сбрасываем флаг через небольшую задержку
+            setTimeout(() => {
+                this.isApplyingRemoteOperation = false;
+            }, 100);
         }
     }
     
@@ -569,6 +792,60 @@ class DocCollabApp {
         });
     }
     
+    startPeriodicSync() {
+        // Запускаем периодическую синхронизацию каждые 2 секунды
+        this.syncInterval = setInterval(() => {
+            if (this.isConnected && this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+                this.requestSync();
+            }
+        }, 2000);
+        console.log('🔄 Запущена периодическая синхронизация');
+    }
+    
+    stopPeriodicSync() {
+        if (this.syncInterval) {
+            clearInterval(this.syncInterval);
+            this.syncInterval = null;
+            console.log('⏹️ Остановлена периодическая синхронизация');
+        }
+    }
+    
+    requestSync() {
+        const syncMessage = {
+            type: 'sync_request'
+        };
+        this.websocket.send(JSON.stringify(syncMessage));
+        console.log('📤 Запрошена синхронизация');
+    }
+    
+    handleSyncResponse(data) {
+        this.isApplyingRemoteOperation = true;
+        try {
+            const serverContent = data.content || '';
+            const serverVersion = data.version || 0;
+            
+            // Применяем состояние с сервера только если версия новее
+            if (serverVersion > this.localVersion) {
+                if (window.editor && typeof window.editor.setValue === 'function') {
+                    window.editor.setValue(serverContent);
+                } else {
+                    const textarea = window.document.getElementById('editor');
+                    if (textarea) {
+                        textarea.value = serverContent;
+                    }
+                }
+                this.localVersion = serverVersion;
+                console.log(`🔄 Синхронизировано с сервером: версия ${serverVersion}`);
+            }
+        } catch (error) {
+            console.error(`❌ Ошибка синхронизации: ${error.message}`);
+        } finally {
+            setTimeout(() => {
+                this.isApplyingRemoteOperation = false;
+            }, 100);
+        }
+    }
+
     toggleCollaborationMode(enabled) {
         if (enabled && this.currentDocument) {
             this.connectWebSocket(this.currentDocument.uuid);
@@ -578,6 +855,7 @@ class DocCollabApp {
                 this.websocket.close();
                 this.websocket = null;
             }
+            this.stopPeriodicSync();
             window.document.getElementById('activeUsers').style.display = 'none';
         }
     }
